@@ -1,27 +1,21 @@
 import numpy as np
 
-def normalize_distribution(arr: np.array):
-    s = sum(arr)
-    if not s == 0:
-        return arr / s
-    else:
-        return np.repeat(1/len(arr), len(arr))
-
 class HiddenMarkovModel:
     '''
     Class implementation of Hidden Markov Models.
 
     Parameters
-        N:          Number of states.
-        V:          Number of observations.
-        A:          The transition matrix.
-        O:          The observation matrix.
-        T0:         Starting transition probabilities. The i^th element is the 
-                    probability of transitioning from the start state to state i.
-                    It is assumed to be uniform.
+        N:              Number of states.
+        V:              Number of observations.
+        A:              The transition matrix.
+        O:              The observation matrix.
+        A_start:        Starting transition probabilities.
+        A_end:          Ending transition probabilities.
+        X_obj_to_idx:   The object to index mapping for observations.d
+        Y_obj_to_idx:   The object to index mapping for states.
     '''
 
-    def __init__(self, A=None, O=None, A_start=None, N=1, V=1):
+    def __init__(self, A=None, O=None, A_start=None, A_end=None, X_obj_to_idx=None, Y_obj_to_idx=None, N=1, V=1):
         '''
         Initializes an HMM. Assumes the following:
             - States and observations are integers starting from 0.
@@ -40,6 +34,7 @@ class HiddenMarkovModel:
                         The (i, j)^th element is the probability of
                         emitting observation j given state i.
             A_start:    The starting state's distribution.
+            A_end:      Transition probabilities to the end state
         
         If T and O are not both provided, then N and V are used. If A_start is
         not provided, a uniform starting distribution is assumed.
@@ -56,10 +51,12 @@ class HiddenMarkovModel:
             self.V = V
             A = np.random.uniform(size=[N, N])
             O = np.random.uniform(size=[N, V])
-            self.A = [row / sum(row) for row in A]
-            self.O = [row / sum(row) for row in O]
+            self.A = np.array([row / sum(row) for row in A])
+            self.O = np.array([row / sum(row) for row in O])
         self.A_start = np.repeat(1/self.N, self.N) if A_start is None else A_start
-
+        self.A_end = np.repeat(1/self.N, self.N) if A_end is None else A_end
+        self.X_obj_to_idx = X_obj_to_idx
+        self.Y_obj_to_idx = Y_obj_to_idx
 
     def viterbi(self, x):
         '''
@@ -164,7 +161,7 @@ class HiddenMarkovModel:
         betas = np.ones((L+1, self.N))
 
         for t in range(L-1, -1, -1):    # L-1, L-2, ..., 0
-            beta_b = np.zeros(shape=(self.N,))
+            beta_b = np.zeros((self.N,))
             for y_t in range(self.N):
                 prob_sum = 0
                 for y_next in range(self.N):
@@ -174,7 +171,11 @@ class HiddenMarkovModel:
                     prob_sum += seq_prob * transition_prob * emission_prob
                 beta_b[y_t] = prob_sum
             if normalize:
-                beta_b /= np.sum(beta_b)
+                s = np.sum(beta_b)
+                if s == 0:
+                    beta_b = np.repeat(1/self.N, self.N)
+                else:
+                    beta_b /= np.sum(beta_b)
             betas[t] = beta_b
         return betas
 
@@ -203,6 +204,8 @@ class HiddenMarkovModel:
         # Clear O and A matrices
         self.O = np.zeros((self.N, self.V))
         self.A = np.zeros((self.N, self.N))
+        self.A_start = np.zeros((self.N,))
+        self.A_end = np.zeros((self.N,))
         for y in Y:
             for state, next_state in zip(y[:-1], y[1:]):
                 denoms[state] += 1
@@ -224,8 +227,15 @@ class HiddenMarkovModel:
                 row /= denom
             else:
                 self.O[i] = np.repeat(1/self.V, self.V)
+        
+        # Update A_start and A_end using the M-step formulas
+        for y in Y:
+            self.A_start[y[0]] += 1
+            self.A_end[y[-1]] += 1
+        self.A_start /= np.sum(self.A_start)
+        self.A_end /= np.sum(self.A_end)
 
-    def unsupervised_learning(self, X, N_iters):
+    def unsupervised_learning(self, X, N_iters, verbose=False):
         '''
         Trains the HMM using the Baum-Welch algorithm on an unlabeled
         datset X. Note that this method does not return anything, but
@@ -244,38 +254,33 @@ class HiddenMarkovModel:
             '''
             Helper function to calculate the joint probability P(y^j = a, x).
             Returns a vector containing P(y=a_1, x) .. P(y=a_L, x).
-            j should range from [1, M]
+            j should range from [1, L]
             '''
-            joint_probs = [0 for _ in range(self.N)]
-            prob_sum = 0
-            if j == 0:
-                return joint_probs
-            for a in range(self.N):
-                prob_sum += alphas[j][a] * betas[j][a]
-            for a in range(self.N):
-                joint_probs[a] = (alphas[j][a] * betas[j][a]) / prob_sum
-            return joint_probs
+            if j <= 0 or j >= alphas.shape[0] + 1:
+                return np.zeros((self.N,))
+            joint_probs = alphas[j] * betas[j]
+            return joint_probs / np.sum(joint_probs)
 
         def joint_transition_prob_xj(alphas, betas, j, x):
             '''
             Helper function to calculate P(y^{j}=a, y^j+1=b, x). Returns a 2D
             vector, with the rows iterating over a, and the columns iterating
-            over b. j should range from [1, M-1].
+            over b. j should range from [1, L-1].
             '''
-            jt_probs = [[0 for _ in range(self.N)] for _ in range(self.N)]
+            jt_probs = np.zeros((self.N, self.N))
             if j == 0:
                 return jt_probs
             prob_sum = 0
             for a in range(self.N):
                 for b in range(self.N):
-                    prob_sum += alphas[j][a] * self.O[b][x[j]] * self.A[a][b] * betas[j+1][b]
-            for a in range(self.N):
-                for b in range(self.N):
-                    jt_probs[a][b] =  alphas[j][a] * self.O[b][x[j]] * self.A[a][b] * betas[j+1][b] / prob_sum
-            return jt_probs
+                    p = alphas[j][a] * self.O[b][x[j]] * self.A[a][b] * betas[j+1][b]
+                    prob_sum += p
+                    jt_probs[a][b] = p
+            return jt_probs / prob_sum
 
         for n in range(N_iters):
-            print(f'epoch {n+1}/{N_iters}')
+            if verbose:
+                print(f'epoch {n+1}/{N_iters}')
             A_nums = np.zeros((self.N, self.N))
             O_nums = np.zeros((self.N, self.V))
             A_denoms = np.zeros((self.N))
@@ -284,9 +289,10 @@ class HiddenMarkovModel:
                 M = len(x)
                 alphas = self.forward(x, normalize=True)
                 betas = self.backward(x, normalize=True)
+                joint_probs_all_j = [joint_prob_xj(alphas, betas, 0)]
                 for j in range(1, M+1): # loop over length of a single sample
                     # Update A
-                    joint_probs = joint_prob_xj(alphas, betas, j-1)
+                    joint_probs = joint_probs_all_j[-1]
                     jt_probs = joint_transition_prob_xj(alphas, betas, j-1, x)
                     for a in range(self.N):
                         A_denoms[a] += joint_probs[a]
@@ -294,6 +300,7 @@ class HiddenMarkovModel:
                             A_nums[a][b] += jt_probs[a][b]
                     # Update O
                     joint_probs = joint_prob_xj(alphas, betas, j)
+                    joint_probs_all_j.append(joint_probs)
                     for a in range(self.N):
                         O_denoms[a] += joint_probs[a]
                         for obs in range(self.V):
@@ -315,17 +322,21 @@ class HiddenMarkovModel:
                     self.O[a] = O_nums[a] / denom
             # Update A_start
             self.A_start = np.zeros((self.N,))
+            self.A_end = np.zeros((self.N,))
             for x in X:
                 self.A_start += self.O.T[x[0]]
+                self.A_end += self.O.T[x[-1]]
             self.A_start /= np.sum(self.A_start)
+            self.A_end /= np.sum(self.A_end)
 
-    def generate_emission(self, M):
+    def generate_emission(self, M, use_end=False):
         '''
-        Generates an emission of length M, assuming that the first state
-        is chosen uniformly at random.
+        Generates an emission of length M.
 
         Arguments:
             M:          Length of the emission to generate.
+            use_end:    Whether or not to use A_end to terminate the sequence.
+
         Returns:
             emission:   The randomly generated emission as a list.
             states:     The randomly generated states as a list.
@@ -344,11 +355,13 @@ class HiddenMarkovModel:
         for _ in range(M):
             prev_state = states[-1]
             emit = rng.choice(possible_emissions, p=self.O[prev_state])
-            print(self.A[prev_state])
             state = rng.choice(possible_states, p=self.A[prev_state])
             emission.append(emit)
             states.append(state)    # this will append an extra state at the end
-        return emission, states[:-1]
+            p_end = self.A_end[prev_state]
+            if use_end and rng.random() < p_end:
+                break
+        return np.array(emission), np.array(states[:-1])
 
 
     def probability_alphas(self, x):
@@ -396,87 +409,3 @@ class HiddenMarkovModel:
                     for j in range(self.N)])
 
         return prob
-
-
-def supervised_HMM(X, Y):
-    '''
-    Helper function to train a supervised HMM. The function determines the
-    number of unique states and observations in the given data, initializes
-    the transition and observation matrices, creates the HMM, and then runs
-    the training function for supervised learning.
-    Arguments:
-        X:          A dataset consisting of input sequences in the form
-                    of lists of variable length, consisting of integers
-                    ranging from 0 to D - 1. In other words, a list of lists.
-        Y:          A dataset consisting of state sequences in the form
-                    of lists of variable length, consisting of integers
-                    ranging from 0 to L - 1. In other words, a list of lists.
-                    Note that the elements in X line up with those in Y.
-    '''
-    # Make a set of observations.
-    observations = set()
-    for x in X:
-        observations |= set(x)
-
-    # Make a set of states.
-    states = set()
-    for y in Y:
-        states |= set(y)
-
-    # Compute L and D.
-    N = len(states)
-    V = len(observations)
-
-    # Train an HMM with labeled data.
-    HMM = HiddenMarkovModel(V=V, N=N)
-    HMM.supervised_learning(X, Y)
-
-    return HMM
-
-def unsupervised_HMM(X, n_states, N_iters, seed=None):
-    '''
-    Helper function to train an unsupervised HMM. The function determines the
-    number of unique observations in the given data, initializes
-    the transition and observation matrices, creates the HMM, and then runs
-    the training function for unsupervised learing.
-    Arguments:
-        X:          A dataset consisting of input sequences in the form
-                    of lists of variable length, consisting of integers
-                    ranging from 0 to D - 1. In other words, a list of lists.
-        n_states:   Number of hidden states to use in training.
-
-        N_iters:    The number of iterations to train on.
-    '''
-    # Initialize random number generator
-    rng = np.random.default_rng(seed=seed)
-
-    # Make a set of observations.
-    observations = set()
-    for x in X:
-        observations |= set(x)
-
-    # Compute L and D.
-    L = n_states
-    D = len(observations)
-
-    # Randomly initialize and normalize matrix A.
-    A = [[rng.random() for i in range(L)] for j in range(L)]
-
-    for i in range(len(A)):
-        norm = sum(A[i])
-        for j in range(len(A[i])):
-            A[i][j] /= norm
-
-    # Randomly initialize and normalize matrix O.
-    O = [[rng.random() for i in range(D)] for j in range(L)]
-
-    for i in range(len(O)):
-        norm = sum(O[i])
-        for j in range(len(O[i])):
-            O[i][j] /= norm
-
-    # Train an HMM with unlabeled data.
-    HMM = HiddenMarkovModel(A, O)
-    HMM.unsupervised_learning(X, N_iters)
-
-    return HMM
