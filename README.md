@@ -1,4 +1,4 @@
-# pythonhmm - Hidden Markov Model Implementation in Python
+# Hidden Markov Model Implementation in Python
 
 ## Features
 
